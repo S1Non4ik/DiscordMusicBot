@@ -31,6 +31,7 @@ ffmpeg_options = {
 }
 
 
+
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -60,10 +61,28 @@ class Music(commands.Cog):
             if inter.guild.id not in queues:
                 queues[inter.guild.id] = []
 
-            queues[inter.guild.id].append({
-                'url': query,
-                'added_at': time.time()
-            })
+            data = self.extract_info(query)
+
+            if 'entries' in data:
+                playlist_title = data.get('title', 'Неизвестный плейлист')
+                track_titles = [entry.get('title', 'Неизвестный трек') for entry in data['entries']]
+                queues[inter.guild.id].append({
+                    'url': query,
+                    'title': f"Плейлист - {playlist_title}",
+                    'tracks': track_titles,
+                    'added_at': time.time()
+                })
+                await inter.followup.send(f"🎶 Добавлен {playlist_title} с треками: {', '.join(track_titles)}")
+            else:  # Если это одиночный трек
+                track_title = data.get('title', 'Неизвестный трек')
+                queues[inter.guild.id].append({
+                    'url': query,
+                    'title': track_title,
+                    'added_at': time.time()
+                })
+                await inter.followup.send(f"🎶 Добавлен трек: {track_title}")
+
+            await self.show_queue(inter)
 
             if len(queues[inter.guild.id]) == 1:
                 await self.play_next(inter.guild.id)
@@ -71,6 +90,21 @@ class Music(commands.Cog):
         except Exception as e:
             await inter.followup.send(f"🚫 Ошибка: {str(e)}")
             print(f"Play error: {e}")
+
+    async def show_queue(self, inter: disnake.ApplicationCommandInteraction):
+        queue = queues.get(inter.guild.id, [])
+        if not queue:
+            await inter.followup.send("🎶 Очередь пуста.")
+            return
+
+        queue_message = "🎶 Текущая очередь:\n"
+        for idx, track in enumerate(queue):
+            if 'tracks' in track:  # Если это плейлист
+                queue_message += f"{idx + 1}. {track['title']} - Треки: {', '.join(track['tracks'])}\n"
+            else:  # Если это одиночный трек
+                queue_message += f"{idx + 1}. {track['title']}\n"
+
+        await inter.followup.send(queue_message)
 
     async def play_next(self, guild_id, retries=3):
         if not queues.get(guild_id) or not voice_clients.get(guild_id):
@@ -80,12 +114,7 @@ class Music(commands.Cog):
             track = queues[guild_id][0]
             loop = asyncio.get_event_loop()
 
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(
-                track['url'],
-                download=False,
-                process=True,
-                extra_info={'extract_flat': True}
-            ))
+            data = await loop.run_in_executor(None, self.extract_info, track['url'])
 
             if 'entries' in data:
                 entries = list(data['entries'])
@@ -98,6 +127,7 @@ class Music(commands.Cog):
                     if entry and entry.get('url'):
                         queues[guild_id].insert(0, {
                             'url': entry['url'],
+                            'title': entry.get('title', 'Неизвестный трек'),  # Сохраняем название трека
                             'added_at': time.time()
                         })
 
@@ -105,12 +135,11 @@ class Music(commands.Cog):
                 return
 
             if 'url' not in data:
-                data = ytdl.process_ie_result(data, download=False)
+                raise Exception("Не удалось получить URL трека")
 
             url = data['url']
             headers = data.get('http_headers', {})
 
-            # Формирование параметров FFmpeg
             headers_str = "\r\n".join([f"{k}: {v}" for k, v in headers.items()])
             current_ffmpeg_options = {
                 'before_options': ffmpeg_options['before_options'],
@@ -131,6 +160,14 @@ class Music(commands.Cog):
                 await self.play_next(guild_id, retries - 1)
             else:
                 await self.force_skip(guild_id)
+
+    def extract_info(self, url):
+        return ytdl.extract_info(
+            url,
+            download=False,
+            process=True,
+            extra_info={'extract_flat': True}
+        )
 
     async def song_finished(self, guild_id):
         try:
